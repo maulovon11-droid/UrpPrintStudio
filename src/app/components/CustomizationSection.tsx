@@ -1,17 +1,37 @@
 import { useState } from 'react';
-import { Upload, Download, Sparkles } from 'lucide-react';
+import { CheckCircle2, Download, Sparkles, Upload } from 'lucide-react';
 import { Card } from './ui/card';
 import { Button } from './ui/button';
 import { Input } from './ui/input';
 import { Label } from './ui/label';
+import { createDesign } from '@/services/designs';
+import { createOrder, createOrderItem } from '@/services/orders';
+import { getFirstActiveProduct, getFirstTemplateForProduct, getProductById } from '@/services/products';
 
-export function CustomizationSection() {
+type CustomizationSectionProps = {
+  selectedProductId: string | null;
+};
+
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+const createOrderCode = () => {
+  const code = crypto.randomUUID().replaceAll('-', '').slice(0, 10).toUpperCase();
+  return `URP-${code}`;
+};
+
+export function CustomizationSection({ selectedProductId }: CustomizationSectionProps) {
   const [customData, setCustomData] = useState({
     nombre: '',
     carrera: '',
     año: '',
+    email: '',
+    telefono: '',
+    cantidad: '1',
     foto: null as string | null,
   });
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitMessage, setSubmitMessage] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -21,6 +41,92 @@ export function CustomizationSection() {
         setCustomData({ ...customData, foto: reader.result as string });
       };
       reader.readAsDataURL(file);
+    }
+  };
+
+  const handleOrderPrint = async () => {
+    setSubmitMessage(null);
+    setSubmitError(null);
+
+    if (!customData.nombre.trim() || !customData.email.trim()) {
+      setSubmitError('Completa tu nombre y correo para crear el pedido.');
+      return;
+    }
+
+    setIsSubmitting(true);
+
+    try {
+      const selectedProduct = selectedProductId && uuidPattern.test(selectedProductId)
+        ? await getProductById(selectedProductId)
+        : null;
+      const product = selectedProduct ?? await getFirstActiveProduct();
+
+      if (!product) {
+        throw new Error('No hay productos activos en Supabase. Ejecuta primero el script schema.sql.');
+      }
+
+      const template = await getFirstTemplateForProduct(product.id);
+      const quantity = Math.max(1, Number.parseInt(customData.cantidad, 10) || 1);
+      const graduationYear = customData.año
+        ? Number.parseInt(customData.año, 10)
+        : null;
+
+      const designId = crypto.randomUUID();
+      const orderId = crypto.randomUUID();
+      const orderCode = createOrderCode();
+
+      await createDesign({
+        id: designId,
+        user_id: null,
+        product_id: product.id,
+        template_id: template?.id ?? null,
+        status: 'saved',
+        guest_email: customData.email.trim(),
+        customer_name: customData.nombre.trim(),
+        customer_career: customData.carrera.trim() || null,
+        graduation_year: graduationYear,
+        canvas_data: {
+          source: 'web-editor',
+          product_slug: product.slug,
+          fields: {
+            nombre: customData.nombre,
+            carrera: customData.carrera,
+            año: customData.año,
+            hasPhotoPreview: Boolean(customData.foto),
+          },
+        },
+      });
+
+      await createOrder({
+        id: orderId,
+        order_code: orderCode,
+        user_id: null,
+        status: 'pending',
+        payment_status: 'pending',
+        payment_method: 'none',
+        delivery_method: 'pickup',
+        customer_name: customData.nombre.trim(),
+        customer_email: customData.email.trim(),
+        customer_phone: customData.telefono.trim() || null,
+        notes: `Pedido creado desde el editor web para ${product.name}.`,
+      });
+
+      await createOrderItem({
+        id: crypto.randomUUID(),
+        order_id: orderId,
+        design_id: designId,
+        product_id: product.id,
+        template_id: template?.id ?? null,
+        quantity,
+        unit_price: Number(product.base_price),
+      });
+
+      setSubmitMessage(`Pedido ${orderCode} creado correctamente.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'No se pudo crear el pedido.';
+      setSubmitError(message);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -62,6 +168,20 @@ export function CustomizationSection() {
                 />
               </div>
 
+              <div>
+                <Label htmlFor="email">Correo</Label>
+                <Input
+                  id="email"
+                  type="email"
+                  placeholder="Ej: alumno@urp.edu.pe"
+                  value={customData.email}
+                  onChange={(e) =>
+                    setCustomData({ ...customData, email: e.target.value })
+                  }
+                  className="mt-2"
+                />
+              </div>
+
               {/* Carrera */}
               <div>
                 <Label htmlFor="carrera">Carrera</Label>
@@ -74,6 +194,34 @@ export function CustomizationSection() {
                   }
                   className="mt-2"
                 />
+              </div>
+
+              <div className="grid sm:grid-cols-2 gap-4">
+                <div>
+                  <Label htmlFor="telefono">Teléfono</Label>
+                  <Input
+                    id="telefono"
+                    placeholder="Ej: 999 888 777"
+                    value={customData.telefono}
+                    onChange={(e) =>
+                      setCustomData({ ...customData, telefono: e.target.value })
+                    }
+                    className="mt-2"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="cantidad">Cantidad</Label>
+                  <Input
+                    id="cantidad"
+                    type="number"
+                    min="1"
+                    value={customData.cantidad}
+                    onChange={(e) =>
+                      setCustomData({ ...customData, cantidad: e.target.value })
+                    }
+                    className="mt-2"
+                  />
+                </div>
               </div>
 
               {/* Año */}
@@ -129,9 +277,25 @@ export function CustomizationSection() {
                   <Download className="mr-2 h-4 w-4" />
                   Descargar diseño
                 </Button>
-                <Button variant="outline" className="w-full">
-                  Ordenar impresión
+                <Button
+                  variant="outline"
+                  className="w-full"
+                  disabled={isSubmitting}
+                  onClick={handleOrderPrint}
+                >
+                  {isSubmitting ? 'Creando pedido...' : 'Ordenar impresión'}
                 </Button>
+                {submitMessage && (
+                  <div className="flex items-center gap-2 rounded-md bg-green-50 px-3 py-2 text-sm text-green-700">
+                    <CheckCircle2 className="h-4 w-4" />
+                    {submitMessage}
+                  </div>
+                )}
+                {submitError && (
+                  <div className="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700">
+                    {submitError}
+                  </div>
+                )}
               </div>
             </div>
           </Card>
