@@ -440,6 +440,178 @@ begin
 end;
 $$;
 
+create or replace function public.create_guest_order(
+  input_product_id uuid,
+  input_template_id uuid default null,
+  input_customer_name text default null,
+  input_customer_email text default null,
+  input_customer_phone text default null,
+  input_customer_career text default null,
+  input_graduation_year integer default null,
+  input_quantity integer default 1,
+  input_delivery_method public.delivery_method default 'pickup',
+  input_notes text default null,
+  input_canvas_data jsonb default '{}'::jsonb,
+  input_source_photo_url text default null,
+  input_preview_image_url text default null,
+  input_trace_id text default null
+)
+returns table (
+  design_id uuid,
+  order_id uuid,
+  order_item_id uuid,
+  order_code text,
+  subtotal numeric(10, 2),
+  total_amount numeric(10, 2),
+  trace_id text
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  selected_product public.products%rowtype;
+  selected_template public.templates%rowtype;
+  next_design_id uuid := gen_random_uuid();
+  next_order_id uuid := gen_random_uuid();
+  next_order_item_id uuid := gen_random_uuid();
+  next_order_code text := 'URP-' || upper(substr(replace(gen_random_uuid()::text, '-', ''), 1, 10));
+  normalized_customer_name text := nullif(btrim(input_customer_name), '');
+  normalized_customer_email text := nullif(lower(btrim(input_customer_email)), '');
+  normalized_customer_phone text := nullif(btrim(input_customer_phone), '');
+  normalized_customer_career text := nullif(btrim(input_customer_career), '');
+  normalized_notes text := nullif(btrim(input_notes), '');
+  normalized_quantity integer := greatest(coalesce(input_quantity, 1), 1);
+  normalized_trace_id text := coalesce(nullif(btrim(input_trace_id), ''), gen_random_uuid()::text);
+begin
+  if normalized_customer_name is null then
+    raise exception 'Customer name is required.';
+  end if;
+
+  if normalized_customer_email is null or position('@' in normalized_customer_email) <= 1 then
+    raise exception 'Customer email is required.';
+  end if;
+
+  select *
+  into selected_product
+  from public.products
+  where id = input_product_id
+    and active = true;
+
+  if not found then
+    raise exception 'Active product not found for id %.', input_product_id;
+  end if;
+
+  if input_template_id is not null then
+    select *
+    into selected_template
+    from public.templates
+    where id = input_template_id
+      and product_id = selected_product.id
+      and active = true;
+
+    if not found then
+      raise exception 'Active template % does not belong to product %.', input_template_id, selected_product.id;
+    end if;
+  end if;
+
+  insert into public.designs (
+    id,
+    user_id,
+    product_id,
+    template_id,
+    status,
+    guest_email,
+    customer_name,
+    customer_career,
+    graduation_year,
+    source_photo_url,
+    preview_image_url,
+    canvas_data
+  )
+  values (
+    next_design_id,
+    null,
+    selected_product.id,
+    selected_template.id,
+    'saved',
+    normalized_customer_email,
+    normalized_customer_name,
+    normalized_customer_career,
+    input_graduation_year,
+    input_source_photo_url,
+    input_preview_image_url,
+    coalesce(input_canvas_data, '{}'::jsonb) || jsonb_build_object(
+      'trace_id', normalized_trace_id,
+      'order_code', next_order_code
+    )
+  );
+
+  insert into public.orders (
+    id,
+    order_code,
+    user_id,
+    status,
+    payment_status,
+    payment_method,
+    delivery_method,
+    customer_name,
+    customer_email,
+    customer_phone,
+    notes
+  )
+  values (
+    next_order_id,
+    next_order_code,
+    null,
+    'pending',
+    'pending',
+    'none',
+    input_delivery_method,
+    normalized_customer_name,
+    normalized_customer_email,
+    normalized_customer_phone,
+    case
+      when normalized_notes is null then 'trace_id=' || normalized_trace_id
+      else normalized_notes || ' | trace_id=' || normalized_trace_id
+    end
+  );
+
+  insert into public.order_items (
+    id,
+    order_id,
+    design_id,
+    product_id,
+    template_id,
+    quantity,
+    unit_price
+  )
+  values (
+    next_order_item_id,
+    next_order_id,
+    next_design_id,
+    selected_product.id,
+    selected_template.id,
+    normalized_quantity,
+    selected_product.base_price
+  );
+
+  perform public.refresh_order_totals(next_order_id);
+
+  return query
+  select
+    next_design_id,
+    next_order_id,
+    next_order_item_id,
+    o.order_code,
+    o.subtotal,
+    o.total_amount,
+    normalized_trace_id
+  from public.orders o
+  where o.id = next_order_id;
+end;
+$$;
+
 drop trigger if exists set_profiles_updated_at on public.profiles;
 create trigger set_profiles_updated_at
 before update on public.profiles
@@ -499,6 +671,23 @@ drop trigger if exists mark_design_as_ordered on public.order_items;
 create trigger mark_design_as_ordered
 after insert on public.order_items
 for each row execute function public.mark_design_as_ordered();
+
+grant execute on function public.create_guest_order(
+  uuid,
+  uuid,
+  text,
+  text,
+  text,
+  text,
+  integer,
+  integer,
+  public.delivery_method,
+  text,
+  jsonb,
+  text,
+  text,
+  text
+) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Indexes
